@@ -1,11 +1,10 @@
 {
-  "name": "socket-chat-example",
+  "name": "simulator",
   "version": "0.0.1",
-  "description": "my first socket.io app",
+  "description": "simulator server",
   "scripts": {
-    "start": "node index.js"
+    "dev": "nodemon --watch 'src/**/*.ts' --exec 'ts-node' src/server.ts"
   },
-  "type": "module",
   "dependencies": {
     "dotenv": "^16.5.0",
     "express": "4"
