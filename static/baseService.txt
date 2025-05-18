@@ -1,0 +1,242 @@
+import { getAccessToken, onRefreshToken } from '@vietcap/core';
+import axios, {
+  AxiosError,
+  AxiosInstance,
+  AxiosRequestConfig,
+  AxiosRequestHeaders,
+  AxiosResponse,
+  InternalAxiosRequestConfig,
+  Method
+} from 'axios';
+
+type ICustomConfigRequest = InternalAxiosRequestConfig & {
+  metadata: { startTime: number };
+};
+
+type ICustomConfigResponse = InternalAxiosRequestConfig & {
+  metadata: { startTime: number; responseTime: number };
+};
+
+type InterceptorHooks = {
+  onRequest?: (
+    config: ICustomConfigRequest
+  ) => void | InternalAxiosRequestConfig | Promise<InternalAxiosRequestConfig>;
+  onResponse?: (
+    response: Omit<AxiosResponse, 'config'> & {
+      config: ICustomConfigResponse;
+    }
+  ) =>
+    | void
+    | (Omit<AxiosResponse, 'config'> & {
+        config: ICustomConfigResponse;
+      })
+    | Promise<
+        Omit<AxiosResponse, 'config'> & {
+          config: ICustomConfigResponse;
+        }
+      >;
+  onResponseError?: (
+    error: Omit<AxiosError, 'config'> & {
+      config: ICustomConfigResponse;
+    }
+  ) => any;
+};
+
+export class BaseService {
+  protected readonly instance: AxiosInstance;
+  protected proxiesKey: string[] = [];
+  constructor(baseUrl: string, interceptors?: InterceptorHooks) {
+    this.instance = axios.create({
+      baseURL: baseUrl,
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json'
+      }
+    });
+
+    this.instance.interceptors.request.use(
+      async config => {
+        const customConfig = { ...config } as ICustomConfigRequest;
+        customConfig.headers = {
+          ...(customConfig.headers ?? {})
+        } as AxiosRequestHeaders;
+        const accessToken = getAccessToken();
+        if (accessToken && !customConfig.headers['isIgnoreAuth']) {
+          customConfig.headers['Authorization'] = `Bearer ${accessToken}`;
+        } else {
+          delete customConfig.headers['Authorization'];
+        }
+
+        delete customConfig.headers['isIgnoreAuth'];
+
+        customConfig.metadata = {
+          startTime: new Date().getTime()
+        };
+        if (interceptors?.onRequest) {
+          await interceptors.onRequest(customConfig);
+        }
+
+        return customConfig;
+      },
+      error => this.handleError(error, interceptors)
+    );
+
+    this.instance.interceptors.response.use(
+      async response => {
+        this.setResponseTime(response.config as ICustomConfigResponse);
+        const res = await onRefreshToken(response, this.instance);
+
+        await this.updateProxyKey();
+        const proxyKey = this.checkValidKey(response.config.url ?? '');
+        if (proxyKey) {
+          const data = await this.getValueByKey(proxyKey);
+          response.data = data;
+        }
+
+        if (interceptors?.onResponse) {
+          await interceptors.onResponse(
+            res as Omit<AxiosResponse, 'config'> & {
+              config: ICustomConfigResponse;
+            }
+          );
+        }
+        return res;
+      },
+      async error => {
+        if (error.response?.status === 401) {
+          return await onRefreshToken(error.response, this.instance);
+        }
+        return this.handleError(error, interceptors);
+      }
+    );
+  }
+
+  private async updateProxyKey() {
+    const proxyKeys = await (
+      await axios.get('http://localhost:8080/proxies/keys')
+    ).data.data;
+
+    this.proxiesKey = proxyKeys ?? [];
+  }
+
+  private async getValueByKey(key: string) {
+    return (
+      await axios.get(`http://localhost:8080/proxies/value-by-key?key=${key}`)
+    ).data.data;
+  }
+
+  private checkValidKey(url: string) {
+    for (let index = 0; index < this.proxiesKey.length; index++) {
+      const key = this.proxiesKey[index];
+      if (url.replaceAll('/', '_').includes(key)) {
+        return key;
+      }
+    }
+
+    return false;
+  }
+
+  private async handleError(
+    error: Omit<AxiosError, 'config'> & {
+      config: ICustomConfigResponse;
+    },
+    interceptors?: InterceptorHooks
+  ): Promise<never> {
+    this.setResponseTime(error.config);
+    if (interceptors?.onResponseError) {
+      await interceptors.onResponseError(error);
+    }
+
+    if (error.response?.status === 401 || error.response?.status === 403) {
+      return Promise.reject(error);
+    }
+
+    return Promise.reject(error.response?.data);
+  }
+
+  private setResponseTime(config: ICustomConfigResponse) {
+    const metadata = config.metadata;
+    const requestStartTime = metadata?.startTime;
+
+    const responseTime = requestStartTime
+      ? new Date().getTime() - Number(requestStartTime)
+      : 0;
+    config.metadata = {
+      startTime: metadata?.startTime!,
+      responseTime
+    };
+  }
+
+  public async get<TRequest, TResponse>(
+    path: string,
+    params?: TRequest | null,
+    config?: AxiosRequestConfig
+  ): Promise<TResponse> {
+    const response: AxiosResponse<TResponse, TRequest> =
+      await this.instance.get(path, {
+        params,
+        paramsSerializer: { indexes: null },
+        ...config
+      });
+    return response.data;
+  }
+
+  public async post<TRequest, TResponse>(
+    path: string,
+    data: TRequest,
+    config?: AxiosRequestConfig
+  ): Promise<TResponse> {
+    const response: AxiosResponse<TResponse, TRequest> =
+      await this.instance.post(path, data, config);
+    return response.data;
+  }
+
+  public async put<TRequest, TResponse>(
+    path: string,
+    data: TRequest,
+    config?: AxiosRequestConfig
+  ): Promise<TResponse> {
+    const response: AxiosResponse<TResponse, TRequest> =
+      await this.instance.put(path, data, config);
+    return response.data;
+  }
+
+  public async del<TRequest, TResponse>(
+    path: string,
+    params: TRequest | null,
+    config?: AxiosRequestConfig
+  ): Promise<TResponse> {
+    const response: AxiosResponse<TResponse, TRequest> =
+      await this.instance.delete(path, {
+        params,
+        ...config
+      });
+    return response.data;
+  }
+
+  public async patch<TRequest, TResponse>(
+    path: string,
+    data: TRequest,
+    config?: AxiosRequestConfig
+  ): Promise<TResponse> {
+    const response: AxiosResponse<TResponse, TRequest> =
+      await this.instance.patch(path, data, config);
+    return response.data;
+  }
+
+  public async request<TRequest, TResponse>(
+    path: string,
+    params: TRequest,
+    method: Method | string,
+    config?: AxiosRequestConfig
+  ): Promise<TResponse> {
+    const response: AxiosResponse<TResponse, TRequest> =
+      await this.instance.request({
+        url: path,
+        method,
+        params,
+        ...config
+      });
+    return response.data;
+  }
+}
